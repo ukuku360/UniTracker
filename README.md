@@ -51,6 +51,40 @@ Then restart the dev server.
 
 ---
 
+## Handbook scraping (2026 Semester 1)
+
+Generate the local handbook dataset used by the lookup card:
+
+```bash
+npm run scrape:handbook
+```
+
+Optional flags:
+
+```bash
+npm run scrape:handbook -- --search <url> --max-pages 5 --concurrency 4 --delay-ms 200 --output public/data/handbook-2026-s1.json
+```
+
+The output is written to `public/data/handbook-2026-s1.json`.
+
+### Optional: Handbook API server
+
+Run a lightweight API server that provides `/api/handbook/meta` and `/api/handbook/refresh`:
+
+```bash
+npm run api:handbook
+```
+
+Then set the client base URL:
+
+```
+VITE_HANDBOOK_API_BASE=http://127.0.0.1:5174
+```
+
+If you want to protect refresh calls, set `HANDBOOK_REFRESH_TOKEN` on the server and send `X-Handbook-Token` with the request.
+
+---
+
 # React + Vite
 
 This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.

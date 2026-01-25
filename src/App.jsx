@@ -25,10 +25,19 @@ const COURSE_COLORS = [
 
 const ASSESSMENT_TYPES = ['Assignment', 'Quiz', 'Midterm', 'Final', 'Project']
 
+const HANDBOOK_DATA_URL = '/data/handbook-2026-s1.json'
+
+const HANDBOOK_API_BASE = import.meta.env.VITE_HANDBOOK_API_BASE || ''
+const buildApiUrl = (path) =>
+  HANDBOOK_API_BASE
+    ? `${HANDBOOK_API_BASE.replace(/\/$/, '')}${path}`
+    : path
+
 const STORAGE_KEYS = {
   courses: 'unitracker-courses',
   assessments: 'unitracker-assessments',
   wamGoal: 'unitracker-wam-goal',
+  handbookCache: 'unitracker-handbook-cache',
 }
 
 const AUTH_VIEWS = {
@@ -61,6 +70,14 @@ const saveLocal = (key, value) => {
   }
 }
 
+const fetchJson = async (url, options = {}) => {
+  const response = await fetch(url, { cache: 'no-store', ...options })
+  if (!response.ok) {
+    throw new Error(`Request failed: ${response.status}`)
+  }
+  return response.json()
+}
+
 const formatDateShort = (value) => {
   if (!value) return 'No date'
   try {
@@ -83,6 +100,22 @@ const toNumberOrNull = (value) => {
   if (value === '' || value === null || value === undefined) return null
   const numberValue = Number(value)
   return Number.isFinite(numberValue) ? numberValue : null
+}
+
+const normalizeCourseCode = (value) =>
+  value ? value.replace(/\s+/g, '').toUpperCase() : ''
+
+const getAssessmentDisplay = (row) => {
+  const entries = Object.entries(row || {}).filter(([, value]) => value)
+  if (!entries.length) {
+    return { title: 'Assessment', details: [] }
+  }
+  const primary =
+    entries.find(([key]) => /description/i.test(key)) || entries[0]
+  const details = entries
+    .filter(([key]) => key !== primary[0])
+    .map(([label, value]) => ({ label, value }))
+  return { title: primary[1], details }
 }
 
 const sortByDueDate = (items) => {
@@ -211,6 +244,12 @@ function App() {
     courseId: null,
   })
   const [profileOpen, setProfileOpen] = useState(false)
+
+  const [handbookStatus, setHandbookStatus] = useState('idle')
+  const [handbookError, setHandbookError] = useState('')
+  const [handbookData, setHandbookData] = useState([])
+  const [handbookMeta, setHandbookMeta] = useState(null)
+  const [handbookQuery, setHandbookQuery] = useState('')
 
   useEffect(() => {
     if (!hasSupabaseConfig) {
@@ -348,6 +387,106 @@ function App() {
     }
   }, [user])
 
+  const loadHandbookData = useCallback(
+    async ({ force = false } = {}) => {
+      if (!user) return
+      setHandbookStatus('loading')
+      setHandbookError('')
+
+      const cached = loadLocal(STORAGE_KEYS.handbookCache, null)
+      let meta = null
+
+      if (!force) {
+        try {
+          meta = await fetchJson(buildApiUrl('/api/handbook/meta'))
+        } catch (error) {
+          meta = null
+        }
+      }
+
+      if (
+        !force &&
+        meta?.version &&
+        cached?.version === meta.version &&
+        cached?.items?.length
+      ) {
+        setHandbookData(cached.items)
+        setHandbookMeta({
+          generatedAt: meta.generatedAt || cached.generatedAt,
+          total: cached.items.length,
+          version: meta.version,
+          cachedAt: cached.cachedAt || null,
+        })
+        setHandbookStatus('ready')
+        return
+      }
+
+      try {
+        let payload = null
+        try {
+          payload = await fetchJson(buildApiUrl('/api/handbook'))
+        } catch (error) {
+          payload = await fetchJson(HANDBOOK_DATA_URL)
+        }
+
+        const items = Array.isArray(payload?.items) ? payload.items : []
+        const version = payload?.version || meta?.version || null
+        const generatedAt = payload?.generatedAt || meta?.generatedAt || null
+
+        setHandbookData(items)
+        setHandbookMeta({
+          generatedAt,
+          total: items.length,
+          version,
+        })
+        setHandbookStatus('ready')
+
+        saveLocal(STORAGE_KEYS.handbookCache, {
+          version,
+          generatedAt,
+          items,
+          cachedAt: new Date().toISOString(),
+        })
+      } catch (error) {
+        console.warn('Failed to load handbook data', error)
+        if (cached?.items?.length) {
+          setHandbookData(cached.items)
+          setHandbookMeta({
+            generatedAt: cached.generatedAt || null,
+            total: cached.items.length,
+            version: cached.version || null,
+            cachedAt: cached.cachedAt || null,
+          })
+          setHandbookStatus('ready')
+        } else {
+          setHandbookStatus('error')
+          setHandbookError('Handbook data not available. Run the scraper first.')
+        }
+      }
+    },
+    [user],
+  )
+
+  const refreshHandbookData = useCallback(async () => {
+    if (!user) return
+    setHandbookStatus('loading')
+    setHandbookError('')
+    try {
+      await fetchJson(buildApiUrl('/api/handbook/refresh'), {
+        method: 'POST',
+      })
+      await loadHandbookData({ force: true })
+    } catch (error) {
+      console.warn('Failed to refresh handbook data', error)
+      await loadHandbookData({ force: true })
+    }
+  }, [user, loadHandbookData])
+
+  useEffect(() => {
+    if (!user) return
+    loadHandbookData()
+  }, [user, loadHandbookData])
+
   useEffect(() => {
     if (!user || !hasSupabaseConfig || !hasLoadedRemoteRef.current) return
     if (saveTimeoutRef.current) {
@@ -368,6 +507,21 @@ function App() {
     () => new Map(courses.map((course) => [course.id, course])),
     [courses],
   )
+
+  const handbookIndex = useMemo(() => {
+    const map = new Map()
+    handbookData.forEach((item) => {
+      if (item?.code) {
+        map.set(item.code.toUpperCase(), item)
+      }
+    })
+    return map
+  }, [handbookData])
+
+  const normalizedHandbookQuery = normalizeCourseCode(handbookQuery)
+  const handbookResult = normalizedHandbookQuery
+    ? handbookIndex.get(normalizedHandbookQuery)
+    : null
 
   const assessmentsByCourse = useMemo(() => {
     const grouped = new Map()
@@ -522,6 +676,27 @@ function App() {
       return
     }
     setCourseModal({ open: true, mode: 'add', course: null })
+  }
+
+  const openAddCourseWithHandbook = (subject) => {
+    if (courses.length >= 8) {
+      window.alert('Limit reached: up to 8 courses per semester.')
+      return
+    }
+    if (!subject) {
+      setCourseModal({ open: true, mode: 'add', course: null })
+      return
+    }
+    setCourseModal({
+      open: true,
+      mode: 'add',
+      course: {
+        name: subject.name || '',
+        creditPoints: subject.creditPoints ?? '',
+        code: subject.code || '',
+        color: COURSE_COLORS[0].value,
+      },
+    })
   }
 
   const openEditCourse = (course) => {
@@ -1010,6 +1185,213 @@ function App() {
                   )
                 })}
               </div>
+            </section>
+
+            <section className="rounded-3xl bg-white/70 p-6 shadow-neu">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h2 className="text-lg font-semibold text-slate-700">
+                    Handbook lookup
+                  </h2>
+                  <p className="text-xs text-slate-400">
+                    2026 Semester 1 ·{' '}
+                    {handbookMeta?.total || 0} subjects
+                  </p>
+                  {handbookMeta?.generatedAt && (
+                    <p className="text-[11px] text-slate-400">
+                      Updated {formatDateTime(handbookMeta.generatedAt)}
+                    </p>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  onClick={refreshHandbookData}
+                  disabled={handbookStatus === 'loading'}
+                  className="rounded-2xl bg-white px-4 py-2 text-xs font-semibold text-slate-500 shadow-neu transition hover:-translate-y-0.5 hover:shadow-neu-sm disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {handbookStatus === 'loading' ? 'Refreshing…' : 'Refresh'}
+                </button>
+              </div>
+
+              <form
+                onSubmit={(event) => event.preventDefault()}
+                className="mt-4 flex flex-wrap gap-3"
+              >
+                <label className="flex flex-1 flex-col gap-2 text-xs font-semibold text-slate-500">
+                  <span className="uppercase tracking-[0.2em] text-[10px] text-slate-400">
+                    Subject code
+                  </span>
+                  <input
+                    name="handbookCode"
+                    type="text"
+                    value={handbookQuery}
+                    onChange={(event) =>
+                      setHandbookQuery(event.target.value.toUpperCase())
+                    }
+                    placeholder="e.g. MAST10006"
+                    autoComplete="off"
+                    className="w-full rounded-2xl bg-white/80 px-4 py-2 text-sm text-slate-700 shadow-neu focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                  />
+                </label>
+                <button
+                  type="submit"
+                  className="self-end rounded-2xl bg-accent px-5 py-2 text-xs font-semibold text-white shadow-neu transition hover:-translate-y-0.5 hover:shadow-neu-sm"
+                >
+                  Find
+                </button>
+              </form>
+
+              {handbookStatus === 'loading' && (
+                <p className="mt-4 text-xs text-slate-400">
+                  Loading handbook data…
+                </p>
+              )}
+
+              {handbookStatus === 'error' && (
+                <p className="mt-4 rounded-2xl bg-rose-50 px-3 py-2 text-xs text-rose-500">
+                  {handbookError}
+                </p>
+              )}
+
+              {handbookStatus === 'ready' && !normalizedHandbookQuery && (
+                <p className="mt-4 text-xs text-slate-400">
+                  Enter a subject code to see the overview, assessment, and
+                  instructor email(s).
+                </p>
+              )}
+
+              {handbookStatus === 'ready' &&
+                normalizedHandbookQuery &&
+                !handbookResult && (
+                  <p className="mt-4 text-xs text-slate-400">
+                    No Semester 1 match found for {normalizedHandbookQuery}.
+                  </p>
+                )}
+
+              {handbookResult && (
+                <div className="mt-5 space-y-6">
+                  <div className="rounded-2xl bg-white/80 p-4 shadow-neu">
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <div>
+                        <h3 className="text-base font-semibold text-slate-800">
+                          {handbookResult.name}
+                        </h3>
+                        <p className="text-xs text-slate-400">
+                          {handbookResult.code} ·{' '}
+                          {handbookResult.studyPeriod || 'Semester 1'} 2026
+                        </p>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        {handbookResult.instructorEmails?.length > 0 && (
+                          <div className="rounded-2xl bg-emerald-50 px-3 py-2 text-[11px] text-emerald-700">
+                            {handbookResult.instructorEmails.length} instructor
+                            {handbookResult.instructorEmails.length === 1
+                              ? ''
+                              : 's'}
+                          </div>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => openAddCourseWithHandbook(handbookResult)}
+                          className="rounded-2xl bg-accent px-3 py-2 text-[11px] font-semibold text-white shadow-neu transition hover:-translate-y-0.5 hover:shadow-neu-sm"
+                        >
+                          Add course
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="mt-4">
+                      <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-slate-400">
+                        Overview
+                      </p>
+                      <div className="mt-2 space-y-2">
+                        {handbookResult.overview?.length ? (
+                          handbookResult.overview.map((paragraph, index) => (
+                            <p
+                              key={`${handbookResult.code}-overview-${index}`}
+                              className="text-xs text-slate-500 whitespace-pre-line"
+                            >
+                              {paragraph}
+                            </p>
+                          ))
+                        ) : (
+                          <p className="text-xs text-slate-400">
+                            No overview available.
+                          </p>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="mt-4">
+                      <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-slate-400">
+                        Assessment
+                      </p>
+                      <div className="mt-3 space-y-3">
+                        {handbookResult.assessment?.tables?.length ? (
+                          handbookResult.assessment.tables.map((table, tableIndex) => (
+                            <div
+                              key={`${handbookResult.code}-table-${tableIndex}`}
+                              className="space-y-3 rounded-2xl bg-white/70 p-4 shadow-neu"
+                            >
+                              {table.rows.map((row, rowIndex) => {
+                                const { title, details } = getAssessmentDisplay(row)
+                                return (
+                                  <div
+                                    key={`${handbookResult.code}-row-${tableIndex}-${rowIndex}`}
+                                    className="border-b border-slate-100 pb-3 last:border-b-0 last:pb-0"
+                                  >
+                                    <p className="text-sm font-semibold text-slate-700">
+                                      {title}
+                                    </p>
+                                    {details.length > 0 && (
+                                      <div className="mt-1 flex flex-wrap gap-2 text-[11px] text-slate-400">
+                                        {details.map((detail) => (
+                                          <span
+                                            key={`${handbookResult.code}-${detail.label}-${rowIndex}`}
+                                            className="rounded-full bg-white/70 px-2 py-1"
+                                          >
+                                            {detail.label}: {detail.value}
+                                          </span>
+                                        ))}
+                                      </div>
+                                    )}
+                                  </div>
+                                )
+                              })}
+                            </div>
+                          ))
+                        ) : (
+                          <p className="text-xs text-slate-400">
+                            No assessment data available.
+                          </p>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="mt-4">
+                      <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-slate-400">
+                        Instructor email
+                      </p>
+                      <div className="mt-2 flex flex-wrap gap-2">
+                        {handbookResult.instructorEmails?.length ? (
+                          handbookResult.instructorEmails.map((email) => (
+                            <span
+                              key={`${handbookResult.code}-${email}`}
+                              className="rounded-full bg-white/70 px-3 py-1 text-[11px] text-slate-500 shadow-neu"
+                            >
+                              {email}
+                            </span>
+                          ))
+                        ) : (
+                          <p className="text-xs text-slate-400">
+                            No instructor email listed for Semester 1.
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
             </section>
 
           </main>
@@ -1643,6 +2025,7 @@ function CourseDetailModal({
 
 function CourseModal({ open, mode, course, onClose, onSave, onDelete }) {
   const [form, setForm] = useState(() => ({
+    code: course?.code || '',
     name: course?.name || '',
     creditPoints: course?.creditPoints || '',
     targetMark: course?.targetMark ?? '',
@@ -1668,8 +2051,11 @@ function CourseModal({ open, mode, course, onClose, onSave, onDelete }) {
       return
     }
 
+    const codeValue = normalizeCourseCode(form.code)
+
     const payload = {
       id: course?.id || createId(),
+      code: codeValue || '',
       name: form.name.trim(),
       creditPoints: Number(form.creditPoints),
       targetMark: targetValue,
@@ -1710,6 +2096,24 @@ function CourseModal({ open, mode, course, onClose, onSave, onDelete }) {
         </div>
 
         <form className="mt-5 flex flex-col gap-4" onSubmit={handleSubmit}>
+          <label className="text-xs font-semibold text-slate-500">
+            Subject code (optional)
+            <input
+              name="courseCode"
+              type="text"
+              value={form.code}
+              onChange={(event) =>
+                setForm((prev) => ({ ...prev, code: event.target.value }))
+              }
+              placeholder="e.g. MAST10006"
+              autoComplete="off"
+              className="mt-2 w-full rounded-2xl bg-white/70 px-4 py-2 text-sm text-slate-700 shadow-neu focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            />
+            <span className="mt-1 block text-[11px] text-slate-400">
+              Used to match handbook data.
+            </span>
+          </label>
+
           <label className="text-xs font-semibold text-slate-500">
             Course name
             <input
