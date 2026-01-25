@@ -105,6 +105,15 @@ const toNumberOrNull = (value) => {
 const normalizeCourseCode = (value) =>
   value ? value.replace(/\s+/g, '').toUpperCase() : ''
 
+const getColorFromCode = (code) => {
+  if (!code) return COURSE_COLORS[0].value
+  let hash = 0
+  for (let i = 0; i < code.length; i += 1) {
+    hash = (hash + code.charCodeAt(i)) % COURSE_COLORS.length
+  }
+  return COURSE_COLORS[hash].value
+}
+
 const getAssessmentDisplay = (row) => {
   const entries = Object.entries(row || {}).filter(([, value]) => value)
   if (!entries.length) {
@@ -217,6 +226,9 @@ function App() {
   const [dataStatus, setDataStatus] = useState('idle')
   const hasLoadedRemoteRef = useRef(false)
   const saveTimeoutRef = useRef(null)
+  const deleteCourseTimeoutRef = useRef(null)
+
+  const handbookResultRef = useRef(null)
 
   const [courses, setCourses] = useState(() =>
     loadLocal(STORAGE_KEYS.courses, []),
@@ -237,6 +249,8 @@ function App() {
     course: null,
   })
   const [courseDetailId, setCourseDetailId] = useState(null)
+  const [deleteCoursePrompt, setDeleteCoursePrompt] = useState(null)
+  const [deleteCourseBusy, setDeleteCourseBusy] = useState(false)
   const [assessmentModal, setAssessmentModal] = useState({
     open: false,
     mode: 'add',
@@ -244,11 +258,11 @@ function App() {
     courseId: null,
   })
   const [profileOpen, setProfileOpen] = useState(false)
+  const [handbookDetail, setHandbookDetail] = useState(null)
 
   const [handbookStatus, setHandbookStatus] = useState('idle')
   const [handbookError, setHandbookError] = useState('')
   const [handbookData, setHandbookData] = useState([])
-  const [handbookMeta, setHandbookMeta] = useState(null)
   const [handbookQuery, setHandbookQuery] = useState('')
 
   useEffect(() => {
@@ -281,6 +295,14 @@ function App() {
       authListener?.subscription?.unsubscribe()
     }
   }, [hasSupabaseConfig])
+
+  useEffect(() => {
+    return () => {
+      if (deleteCourseTimeoutRef.current) {
+        clearTimeout(deleteCourseTimeoutRef.current)
+      }
+    }
+  }, [])
 
   const persistUserData = useCallback(
     async (payload) => {
@@ -399,7 +421,7 @@ function App() {
       if (!force) {
         try {
           meta = await fetchJson(buildApiUrl('/api/handbook/meta'))
-        } catch (error) {
+        } catch (_error) {
           meta = null
         }
       }
@@ -411,12 +433,6 @@ function App() {
         cached?.items?.length
       ) {
         setHandbookData(cached.items)
-        setHandbookMeta({
-          generatedAt: meta.generatedAt || cached.generatedAt,
-          total: cached.items.length,
-          version: meta.version,
-          cachedAt: cached.cachedAt || null,
-        })
         setHandbookStatus('ready')
         return
       }
@@ -425,7 +441,7 @@ function App() {
         let payload = null
         try {
           payload = await fetchJson(buildApiUrl('/api/handbook'))
-        } catch (error) {
+        } catch (_error) {
           payload = await fetchJson(HANDBOOK_DATA_URL)
         }
 
@@ -434,11 +450,6 @@ function App() {
         const generatedAt = payload?.generatedAt || meta?.generatedAt || null
 
         setHandbookData(items)
-        setHandbookMeta({
-          generatedAt,
-          total: items.length,
-          version,
-        })
         setHandbookStatus('ready')
 
         saveLocal(STORAGE_KEYS.handbookCache, {
@@ -451,13 +462,7 @@ function App() {
         console.warn('Failed to load handbook data', error)
         if (cached?.items?.length) {
           setHandbookData(cached.items)
-          setHandbookMeta({
-            generatedAt: cached.generatedAt || null,
-            total: cached.items.length,
-            version: cached.version || null,
-            cachedAt: cached.cachedAt || null,
-          })
-          setHandbookStatus('ready')
+        setHandbookStatus('ready')
         } else {
           setHandbookStatus('error')
           setHandbookError('Handbook data not available. Run the scraper first.')
@@ -466,21 +471,6 @@ function App() {
     },
     [user],
   )
-
-  const refreshHandbookData = useCallback(async () => {
-    if (!user) return
-    setHandbookStatus('loading')
-    setHandbookError('')
-    try {
-      await fetchJson(buildApiUrl('/api/handbook/refresh'), {
-        method: 'POST',
-      })
-      await loadHandbookData({ force: true })
-    } catch (error) {
-      console.warn('Failed to refresh handbook data', error)
-      await loadHandbookData({ force: true })
-    }
-  }, [user, loadHandbookData])
 
   useEffect(() => {
     if (!user) return
@@ -518,10 +508,38 @@ function App() {
     return map
   }, [handbookData])
 
+  const openHandbookDetailFromCourse = useCallback(
+    (course) => {
+      if (!course?.code) return
+      const normalizedCode = normalizeCourseCode(course.code)
+      const matched = handbookIndex.get(normalizedCode)
+      if (!matched) {
+        window.alert('No matching subject found in the handbook data.')
+        return
+      }
+      setHandbookDetail(matched)
+    },
+    [handbookIndex],
+  )
+
   const normalizedHandbookQuery = normalizeCourseCode(handbookQuery)
   const handbookResult = normalizedHandbookQuery
     ? handbookIndex.get(normalizedHandbookQuery)
     : null
+
+  useEffect(() => {
+    if (!handbookResult || !handbookResultRef.current) return
+    handbookResultRef.current.scrollIntoView({
+      behavior: 'smooth',
+      block: 'start',
+    })
+  }, [handbookResult])
+
+  useEffect(() => {
+    if (!handbookResult) {
+      setHandbookDetail(null)
+    }
+  }, [handbookResult])
 
   const assessmentsByCourse = useMemo(() => {
     const grouped = new Map()
@@ -628,6 +646,37 @@ function App() {
     )
   }
 
+  const openDeleteCoursePrompt = (course) => {
+    if (!course) return
+    if (deleteCourseTimeoutRef.current) {
+      clearTimeout(deleteCourseTimeoutRef.current)
+      deleteCourseTimeoutRef.current = null
+    }
+    setDeleteCourseBusy(false)
+    setDeleteCoursePrompt(course)
+  }
+
+  const cancelDeleteCourse = () => {
+    if (deleteCourseTimeoutRef.current) {
+      clearTimeout(deleteCourseTimeoutRef.current)
+      deleteCourseTimeoutRef.current = null
+    }
+    setDeleteCourseBusy(false)
+    setDeleteCoursePrompt(null)
+  }
+
+  const confirmDeleteCourse = () => {
+    if (!deleteCoursePrompt) return
+    setDeleteCourseBusy(true)
+    const targetId = deleteCoursePrompt.id
+    deleteCourseTimeoutRef.current = setTimeout(() => {
+      handleDeleteCourse(targetId)
+      setDeleteCoursePrompt(null)
+      setDeleteCourseBusy(false)
+      deleteCourseTimeoutRef.current = null
+    }, 350)
+  }
+
   const handleSaveAssessment = (payload) => {
     const { mode: payloadMode, ...assessmentData } = payload
     if (payloadMode === 'edit') {
@@ -678,26 +727,6 @@ function App() {
     setCourseModal({ open: true, mode: 'add', course: null })
   }
 
-  const openAddCourseWithHandbook = (subject) => {
-    if (courses.length >= 8) {
-      window.alert('Limit reached: up to 8 courses per semester.')
-      return
-    }
-    if (!subject) {
-      setCourseModal({ open: true, mode: 'add', course: null })
-      return
-    }
-    setCourseModal({
-      open: true,
-      mode: 'add',
-      course: {
-        name: subject.name || '',
-        creditPoints: subject.creditPoints ?? '',
-        code: subject.code || '',
-        color: COURSE_COLORS[0].value,
-      },
-    })
-  }
 
   const openEditCourse = (course) => {
     setCourseModal({ open: true, mode: 'edit', course })
@@ -1033,7 +1062,7 @@ function App() {
                               </p>
                             </div>
                           </div>
-                          <div className="flex items-center gap-2">
+                          <div className="flex flex-wrap items-center gap-2">
                             <button
                               type="button"
                               onClick={(event) => {
@@ -1048,13 +1077,17 @@ function App() {
                               type="button"
                               onClick={(event) => {
                                 event.stopPropagation()
-                                if (
-                                  window.confirm(
-                                    `Delete ${course.name}? This removes all assessments.`,
-                                  )
-                                ) {
-                                  handleDeleteCourse(course.id)
-                                }
+                                openHandbookDetailFromCourse(course)
+                              }}
+                              className="rounded-full bg-white px-3 py-1 text-[11px] font-semibold text-slate-500 shadow-neu transition hover:shadow-neu-sm"
+                            >
+                              View details
+                            </button>
+                            <button
+                              type="button"
+                              onClick={(event) => {
+                                event.stopPropagation()
+                                openDeleteCoursePrompt(course)
                               }}
                               className="rounded-full bg-white px-3 py-1 text-[11px] font-semibold text-slate-400 shadow-neu transition hover:text-red-500"
                             >
@@ -1082,6 +1115,84 @@ function App() {
           </aside>
 
           <main id="main-content" className="flex flex-col gap-6">
+            <section className="rounded-3xl bg-white/70 p-6 shadow-neu">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h2 className="text-lg font-semibold text-slate-700">
+                    Handbook lookup
+                  </h2>
+                  <p className="text-xs text-slate-400">
+                    2026 Semester 1
+                  </p>
+                </div>
+              </div>
+
+              <form
+                onSubmit={(event) => event.preventDefault()}
+                className="mt-4 flex flex-wrap gap-3"
+              >
+                <label className="flex flex-1 flex-col gap-2 text-xs font-semibold text-slate-500">
+                  <span className="uppercase tracking-[0.2em] text-[10px] text-slate-400">
+                    Subject code
+                  </span>
+                  <input
+                    name="handbookCode"
+                    type="text"
+                    value={handbookQuery}
+                    onChange={(event) =>
+                      setHandbookQuery(normalizeCourseCode(event.target.value))
+                    }
+                    placeholder="e.g. MAST10006"
+                    autoComplete="off"
+                    className="w-full rounded-2xl bg-white/80 px-4 py-2 text-sm text-slate-700 shadow-neu focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                  />
+                </label>
+              </form>
+
+              {handbookStatus === 'loading' && (
+                <p className="mt-4 text-xs text-slate-400">
+                  Loading handbook data…
+                </p>
+              )}
+
+              {handbookStatus === 'error' && (
+                <p className="mt-4 rounded-2xl bg-rose-50 px-3 py-2 text-xs text-rose-500">
+                  {handbookError}
+                </p>
+              )}
+
+              {handbookStatus === 'ready' && normalizedHandbookQuery && !handbookResult && (
+                <p className="mt-4 text-xs text-slate-400">
+                  No match found for {normalizedHandbookQuery}.
+                </p>
+              )}
+
+              {handbookResult && (
+                <div ref={handbookResultRef} className="mt-4">
+                  <button
+                    type="button"
+                    onClick={() => setHandbookDetail(handbookResult)}
+                    className="w-full rounded-2xl border border-white/60 bg-white/80 p-4 text-left shadow-neu transition hover:-translate-y-0.5 hover:shadow-neu-sm"
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <div>
+                        <p className="text-base font-semibold text-slate-800">
+                          {handbookResult.name}
+                        </p>
+                        <p className="text-xs text-slate-400">
+                          {handbookResult.code} ·{' '}
+                          {handbookResult.creditPoints || '--'} credit points
+                        </p>
+                      </div>
+                      <span className="rounded-full bg-accent/10 px-3 py-1 text-[11px] font-semibold text-accent">
+                        View details
+                      </span>
+                    </div>
+                  </button>
+                </div>
+              )}
+            </section>
+
             <section className="rounded-3xl bg-white/70 p-6 shadow-neu">
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div>
@@ -1187,212 +1298,7 @@ function App() {
               </div>
             </section>
 
-            <section className="rounded-3xl bg-white/70 p-6 shadow-neu">
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <div>
-                  <h2 className="text-lg font-semibold text-slate-700">
-                    Handbook lookup
-                  </h2>
-                  <p className="text-xs text-slate-400">
-                    2026 Semester 1 ·{' '}
-                    {handbookMeta?.total || 0} subjects
-                  </p>
-                  {handbookMeta?.generatedAt && (
-                    <p className="text-[11px] text-slate-400">
-                      Updated {formatDateTime(handbookMeta.generatedAt)}
-                    </p>
-                  )}
-                </div>
-                <button
-                  type="button"
-                  onClick={refreshHandbookData}
-                  disabled={handbookStatus === 'loading'}
-                  className="rounded-2xl bg-white px-4 py-2 text-xs font-semibold text-slate-500 shadow-neu transition hover:-translate-y-0.5 hover:shadow-neu-sm disabled:cursor-not-allowed disabled:opacity-60"
-                >
-                  {handbookStatus === 'loading' ? 'Refreshing…' : 'Refresh'}
-                </button>
-              </div>
-
-              <form
-                onSubmit={(event) => event.preventDefault()}
-                className="mt-4 flex flex-wrap gap-3"
-              >
-                <label className="flex flex-1 flex-col gap-2 text-xs font-semibold text-slate-500">
-                  <span className="uppercase tracking-[0.2em] text-[10px] text-slate-400">
-                    Subject code
-                  </span>
-                  <input
-                    name="handbookCode"
-                    type="text"
-                    value={handbookQuery}
-                    onChange={(event) =>
-                      setHandbookQuery(event.target.value.toUpperCase())
-                    }
-                    placeholder="e.g. MAST10006"
-                    autoComplete="off"
-                    className="w-full rounded-2xl bg-white/80 px-4 py-2 text-sm text-slate-700 shadow-neu focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-                  />
-                </label>
-                <button
-                  type="submit"
-                  className="self-end rounded-2xl bg-accent px-5 py-2 text-xs font-semibold text-white shadow-neu transition hover:-translate-y-0.5 hover:shadow-neu-sm"
-                >
-                  Find
-                </button>
-              </form>
-
-              {handbookStatus === 'loading' && (
-                <p className="mt-4 text-xs text-slate-400">
-                  Loading handbook data…
-                </p>
-              )}
-
-              {handbookStatus === 'error' && (
-                <p className="mt-4 rounded-2xl bg-rose-50 px-3 py-2 text-xs text-rose-500">
-                  {handbookError}
-                </p>
-              )}
-
-              {handbookStatus === 'ready' && !normalizedHandbookQuery && (
-                <p className="mt-4 text-xs text-slate-400">
-                  Enter a subject code to see the overview, assessment, and
-                  instructor email(s).
-                </p>
-              )}
-
-              {handbookStatus === 'ready' &&
-                normalizedHandbookQuery &&
-                !handbookResult && (
-                  <p className="mt-4 text-xs text-slate-400">
-                    No Semester 1 match found for {normalizedHandbookQuery}.
-                  </p>
-                )}
-
-              {handbookResult && (
-                <div className="mt-5 space-y-6">
-                  <div className="rounded-2xl bg-white/80 p-4 shadow-neu">
-                    <div className="flex flex-wrap items-center justify-between gap-3">
-                      <div>
-                        <h3 className="text-base font-semibold text-slate-800">
-                          {handbookResult.name}
-                        </h3>
-                        <p className="text-xs text-slate-400">
-                          {handbookResult.code} ·{' '}
-                          {handbookResult.studyPeriod || 'Semester 1'} 2026
-                        </p>
-                      </div>
-                      <div className="flex flex-wrap items-center gap-2">
-                        {handbookResult.instructorEmails?.length > 0 && (
-                          <div className="rounded-2xl bg-emerald-50 px-3 py-2 text-[11px] text-emerald-700">
-                            {handbookResult.instructorEmails.length} instructor
-                            {handbookResult.instructorEmails.length === 1
-                              ? ''
-                              : 's'}
-                          </div>
-                        )}
-                        <button
-                          type="button"
-                          onClick={() => openAddCourseWithHandbook(handbookResult)}
-                          className="rounded-2xl bg-accent px-3 py-2 text-[11px] font-semibold text-white shadow-neu transition hover:-translate-y-0.5 hover:shadow-neu-sm"
-                        >
-                          Add course
-                        </button>
-                      </div>
-                    </div>
-
-                    <div className="mt-4">
-                      <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-slate-400">
-                        Overview
-                      </p>
-                      <div className="mt-2 space-y-2">
-                        {handbookResult.overview?.length ? (
-                          handbookResult.overview.map((paragraph, index) => (
-                            <p
-                              key={`${handbookResult.code}-overview-${index}`}
-                              className="text-xs text-slate-500 whitespace-pre-line"
-                            >
-                              {paragraph}
-                            </p>
-                          ))
-                        ) : (
-                          <p className="text-xs text-slate-400">
-                            No overview available.
-                          </p>
-                        )}
-                      </div>
-                    </div>
-
-                    <div className="mt-4">
-                      <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-slate-400">
-                        Assessment
-                      </p>
-                      <div className="mt-3 space-y-3">
-                        {handbookResult.assessment?.tables?.length ? (
-                          handbookResult.assessment.tables.map((table, tableIndex) => (
-                            <div
-                              key={`${handbookResult.code}-table-${tableIndex}`}
-                              className="space-y-3 rounded-2xl bg-white/70 p-4 shadow-neu"
-                            >
-                              {table.rows.map((row, rowIndex) => {
-                                const { title, details } = getAssessmentDisplay(row)
-                                return (
-                                  <div
-                                    key={`${handbookResult.code}-row-${tableIndex}-${rowIndex}`}
-                                    className="border-b border-slate-100 pb-3 last:border-b-0 last:pb-0"
-                                  >
-                                    <p className="text-sm font-semibold text-slate-700">
-                                      {title}
-                                    </p>
-                                    {details.length > 0 && (
-                                      <div className="mt-1 flex flex-wrap gap-2 text-[11px] text-slate-400">
-                                        {details.map((detail) => (
-                                          <span
-                                            key={`${handbookResult.code}-${detail.label}-${rowIndex}`}
-                                            className="rounded-full bg-white/70 px-2 py-1"
-                                          >
-                                            {detail.label}: {detail.value}
-                                          </span>
-                                        ))}
-                                      </div>
-                                    )}
-                                  </div>
-                                )
-                              })}
-                            </div>
-                          ))
-                        ) : (
-                          <p className="text-xs text-slate-400">
-                            No assessment data available.
-                          </p>
-                        )}
-                      </div>
-                    </div>
-
-                    <div className="mt-4">
-                      <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-slate-400">
-                        Instructor email
-                      </p>
-                      <div className="mt-2 flex flex-wrap gap-2">
-                        {handbookResult.instructorEmails?.length ? (
-                          handbookResult.instructorEmails.map((email) => (
-                            <span
-                              key={`${handbookResult.code}-${email}`}
-                              className="rounded-full bg-white/70 px-3 py-1 text-[11px] text-slate-500 shadow-neu"
-                            >
-                              {email}
-                            </span>
-                          ))
-                        ) : (
-                          <p className="text-xs text-slate-400">
-                            No instructor email listed for Semester 1.
-                          </p>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              )}
-            </section>
+            
 
           </main>
         </div>
@@ -1404,6 +1310,8 @@ function App() {
           open={courseModal.open}
           mode={courseModal.mode}
           course={courseModal.course}
+          handbookIndex={handbookIndex}
+          handbookStatus={handbookStatus}
           onClose={() =>
             setCourseModal({ open: false, mode: 'add', course: null })
           }
@@ -1411,8 +1319,8 @@ function App() {
             handleSaveCourse(payload)
             setCourseModal({ open: false, mode: 'add', course: null })
           }}
-          onDelete={(courseId) => {
-            handleDeleteCourse(courseId)
+          onDelete={(course) => {
+            openDeleteCoursePrompt(course)
             setCourseModal({ open: false, mode: 'add', course: null })
           }}
         />
@@ -1425,6 +1333,11 @@ function App() {
           average={courseAverages.get(courseDetailId) ?? null}
           wamGoalNumber={wamGoalNumber}
           onClose={() => setCourseDetailId(null)}
+          onViewHandbook={() => {
+            const selectedCourse = courseMap.get(courseDetailId)
+            setCourseDetailId(null)
+            openHandbookDetailFromCourse(selectedCourse)
+          }}
           onAddAssessment={() => {
             const selectedId = courseDetailId
             setCourseDetailId(null)
@@ -1473,6 +1386,24 @@ function App() {
               courseId: null,
             })
           }}
+        />
+      )}
+
+      {deleteCoursePrompt && (
+        <DeleteCourseModal
+          open={Boolean(deleteCoursePrompt)}
+          course={deleteCoursePrompt}
+          busy={deleteCourseBusy}
+          onCancel={cancelDeleteCourse}
+          onConfirm={confirmDeleteCourse}
+        />
+      )}
+
+      {handbookDetail && (
+        <HandbookDetailModal
+          open={Boolean(handbookDetail)}
+          subject={handbookDetail}
+          onClose={() => setHandbookDetail(null)}
         />
       )}
 
@@ -1801,6 +1732,7 @@ function CourseDetailModal({
   average,
   wamGoalNumber,
   onClose,
+  onViewHandbook,
   onAddAssessment,
   onEditAssessment,
 }) {
@@ -1884,13 +1816,24 @@ function CourseDetailModal({
               {course.creditPoints} credit points · {assessments.length} items
             </p>
           </div>
-          <button
-            type="button"
-            onClick={onClose}
-            className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-slate-500 shadow-neu"
-          >
-            Close
-          </button>
+          <div className="flex items-center gap-2">
+            {onViewHandbook && (
+              <button
+                type="button"
+                onClick={onViewHandbook}
+                className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-slate-500 shadow-neu"
+              >
+                View details
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={onClose}
+              className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-slate-500 shadow-neu"
+            >
+              Close
+            </button>
+          </div>
         </div>
 
         <div className="mt-5 grid gap-4 md:grid-cols-[1.1fr_1fr]">
@@ -2023,43 +1966,57 @@ function CourseDetailModal({
   )
 }
 
-function CourseModal({ open, mode, course, onClose, onSave, onDelete }) {
+function CourseModal({ open, mode, course, handbookIndex, handbookStatus, onClose, onSave, onDelete }) {
   const [form, setForm] = useState(() => ({
     code: course?.code || '',
-    name: course?.name || '',
-    creditPoints: course?.creditPoints || '',
     targetMark: course?.targetMark ?? '',
-    color: course?.color || COURSE_COLORS[0].value,
   }))
   const [error, setError] = useState('')
+
+  const normalizedCode = normalizeCourseCode(form.code)
+  const matchedSubject = normalizedCode
+    ? handbookIndex?.get(normalizedCode)
+    : null
+  const creditPointsValue = matchedSubject?.creditPoints
 
   if (!open) return null
 
   const handleSubmit = (event) => {
     event.preventDefault()
-    if (!form.name.trim()) {
-      setError('Course name is required.')
+    if (!normalizedCode) {
+      setError('Subject code is required.')
       return
     }
-    if (!form.creditPoints || Number(form.creditPoints) <= 0) {
-      setError('Credit points must be a positive number.')
+    if (!matchedSubject) {
+      setError('No matching subject found in the handbook data.')
       return
     }
+
     const targetValue = toNumberOrNull(form.targetMark)
     if (targetValue !== null && (targetValue < 0 || targetValue > 100)) {
       setError('Target mark must be between 0 and 100.')
       return
     }
 
-    const codeValue = normalizeCourseCode(form.code)
+    const nameValue = matchedSubject.name?.trim()
+    const creditPointsNumber = Number(matchedSubject.creditPoints)
+
+    if (!nameValue) {
+      setError('Subject name is missing from handbook data.')
+      return
+    }
+    if (!Number.isFinite(creditPointsNumber) || creditPointsNumber <= 0) {
+      setError('Credit points are missing from handbook data.')
+      return
+    }
 
     const payload = {
       id: course?.id || createId(),
-      code: codeValue || '',
-      name: form.name.trim(),
-      creditPoints: Number(form.creditPoints),
+      code: normalizedCode,
+      name: nameValue,
+      creditPoints: creditPointsNumber,
       targetMark: targetValue,
-      color: form.color,
+      color: course?.color || getColorFromCode(normalizedCode),
       mode,
     }
     onSave(payload)
@@ -2083,7 +2040,7 @@ function CourseModal({ open, mode, course, onClose, onSave, onDelete }) {
               {mode === 'edit' ? 'Edit Course' : 'Add Course'}
             </h3>
             <p id="course-modal-description" className="text-xs text-slate-400">
-              Choose a name, credit points, and a signature color.
+              Enter a subject code to auto-fill the course details.
             </p>
           </div>
           <button
@@ -2097,7 +2054,7 @@ function CourseModal({ open, mode, course, onClose, onSave, onDelete }) {
 
         <form className="mt-5 flex flex-col gap-4" onSubmit={handleSubmit}>
           <label className="text-xs font-semibold text-slate-500">
-            Subject code (optional)
+            Subject code
             <input
               name="courseCode"
               type="text"
@@ -2109,90 +2066,56 @@ function CourseModal({ open, mode, course, onClose, onSave, onDelete }) {
               autoComplete="off"
               className="mt-2 w-full rounded-2xl bg-white/70 px-4 py-2 text-sm text-slate-700 shadow-neu focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
             />
-            <span className="mt-1 block text-[11px] text-slate-400">
-              Used to match handbook data.
-            </span>
           </label>
 
-          <label className="text-xs font-semibold text-slate-500">
-            Course name
-            <input
-              name="courseName"
-              type="text"
-              value={form.name}
-              onChange={(event) =>
-                setForm((prev) => ({ ...prev, name: event.target.value }))
-              }
-              placeholder="e.g. Data Structures…"
-              autoComplete="off"
-              className="mt-2 w-full rounded-2xl bg-white/70 px-4 py-2 text-sm text-slate-700 shadow-neu focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-            />
-          </label>
-
-          <label className="text-xs font-semibold text-slate-500">
-            Credit points
-            <input
-              name="creditPoints"
-              type="number"
-              value={form.creditPoints}
-              onChange={(event) =>
-                setForm((prev) => ({ ...prev, creditPoints: event.target.value }))
-              }
-              placeholder="e.g. 6…"
-              inputMode="numeric"
-              autoComplete="off"
-              className="mt-2 w-full rounded-2xl bg-white/70 px-4 py-2 text-sm text-slate-700 shadow-neu focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-            />
-          </label>
-
-          <label className="text-xs font-semibold text-slate-500">
-            Target mark (optional)
-            <input
-              name="targetMark"
-              type="number"
-              min="0"
-              max="100"
-              step="0.1"
-              value={form.targetMark}
-              onChange={(event) =>
-                setForm((prev) => ({ ...prev, targetMark: event.target.value }))
-              }
-              placeholder="e.g. 75…"
-              inputMode="decimal"
-              autoComplete="off"
-              className="mt-2 w-full rounded-2xl bg-white/70 px-4 py-2 text-sm text-slate-700 shadow-neu focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-            />
-            <span className="mt-1 block text-[11px] text-slate-400">
-              Used in the goal planner to calculate required scores.
-            </span>
-          </label>
-
-          <div>
-            <p className="text-xs font-semibold text-slate-500">Course color</p>
-            <div className="mt-3 grid grid-cols-4 gap-3">
-              {COURSE_COLORS.map((option) => (
-                <button
-                  key={option.value}
-                  type="button"
-                  onClick={() =>
-                    setForm((prev) => ({ ...prev, color: option.value }))
-                  }
-                  aria-label={`Select ${option.name}`}
-                  className={`flex h-10 items-center justify-center rounded-2xl border ${
-                    form.color === option.value
-                      ? 'border-accent shadow-neu-inset'
-                      : 'border-transparent shadow-neu'
-                  } bg-white/70`}
-                >
-                  <span
-                    className="h-4 w-4 rounded-full"
-                    style={{ backgroundColor: option.value }}
-                  />
-                </button>
-              ))}
-            </div>
+          <div className="rounded-2xl bg-white/70 p-4 text-xs text-slate-500 shadow-neu">
+            <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-slate-400">
+              Matched subject
+            </p>
+            {handbookStatus === 'loading' && (
+              <p className="mt-2 text-slate-400">Loading handbook data…</p>
+            )}
+            {handbookStatus !== 'loading' && !normalizedCode && (
+              <p className="mt-2 text-slate-400">Enter a subject code to match.</p>
+            )}
+            {handbookStatus !== 'loading' && normalizedCode && !matchedSubject && (
+              <p className="mt-2 text-rose-500">No match found for {normalizedCode}.</p>
+            )}
+            {matchedSubject && (
+              <div className="mt-2 space-y-2">
+                <p className="text-sm font-semibold text-slate-700">
+                  {matchedSubject.name}
+                </p>
+                <p className="text-[11px] text-slate-400">
+                  {matchedSubject.code} · {creditPointsValue || '--'} credit points
+                </p>
+              </div>
+            )}
           </div>
 
+          {mode === 'edit' && (
+            <label className="text-xs font-semibold text-slate-500">
+              Target mark (optional)
+              <input
+                name="targetMark"
+                type="number"
+                min="0"
+                max="100"
+                step="0.1"
+                value={form.targetMark}
+                onChange={(event) =>
+                  setForm((prev) => ({ ...prev, targetMark: event.target.value }))
+                }
+                placeholder="e.g. 75…"
+                inputMode="decimal"
+                autoComplete="off"
+                className="mt-2 w-full rounded-2xl bg-white/70 px-4 py-2 text-sm text-slate-700 shadow-neu focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              />
+              <span className="mt-1 block text-[11px] text-slate-400">
+                Used in the goal planner to calculate required scores.
+              </span>
+            </label>
+          )}
           {error && (
             <p
               role="alert"
@@ -2206,7 +2129,7 @@ function CourseModal({ open, mode, course, onClose, onSave, onDelete }) {
             {mode === 'edit' && course && (
               <button
                 type="button"
-                onClick={() => onDelete(course.id)}
+                onClick={() => onDelete(course)}
                 className="rounded-2xl bg-white px-4 py-2 text-xs font-semibold text-red-500 shadow-neu"
               >
                 Delete
@@ -2229,6 +2152,234 @@ function CourseModal({ open, mode, course, onClose, onSave, onDelete }) {
             </div>
           </div>
         </form>
+      </div>
+    </div>
+  )
+}
+
+function DeleteCourseModal({ open, course, busy, onCancel, onConfirm }) {
+  if (!open || !course) return null
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/30 px-4 backdrop-blur-sm overscroll-contain">
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="delete-course-title"
+        aria-describedby="delete-course-description"
+        className="w-full max-w-md rounded-3xl border border-white/50 bg-white/80 p-6 shadow-glass backdrop-blur-md"
+      >
+        <div className="flex items-start justify-between">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-400">
+              Delete Course
+            </p>
+            <h3
+              id="delete-course-title"
+              className="mt-2 text-lg font-semibold text-slate-800"
+            >
+              Delete {course.name}?
+            </h3>
+            <p
+              id="delete-course-description"
+              className="mt-2 text-xs text-slate-400"
+            >
+              This removes the course and all of its assessments.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onCancel}
+            disabled={busy}
+            className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-slate-500 shadow-neu disabled:cursor-not-allowed disabled:opacity-70"
+          >
+            Close
+          </button>
+        </div>
+
+        <div className="mt-4 rounded-2xl bg-white/70 p-4 text-xs text-slate-500 shadow-neu">
+          <p className="font-semibold text-slate-600">{course.code}</p>
+          <p className="mt-1 text-[11px] text-slate-400">
+            {course.creditPoints} credit points
+          </p>
+        </div>
+
+        <div className="mt-5 flex items-center justify-end gap-2">
+          <button
+            type="button"
+            onClick={onCancel}
+            disabled={busy}
+            className="rounded-2xl bg-white px-4 py-2 text-xs font-semibold text-slate-500 shadow-neu disabled:cursor-not-allowed disabled:opacity-70"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={onConfirm}
+            disabled={busy}
+            className="rounded-2xl bg-rose-500 px-4 py-2 text-xs font-semibold text-white shadow-neu disabled:cursor-not-allowed disabled:opacity-80"
+          >
+            {busy ? 'Deleting…' : 'Delete'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function HandbookDetailModal({ open, subject, onClose }) {
+  if (!open || !subject) return null
+
+  const overviewItems = Array.isArray(subject.overview) ? subject.overview : []
+  const instructorEmails = Array.isArray(subject.instructorEmails)
+    ? subject.instructorEmails
+    : []
+  const subjectUrl = subject?.source?.subjectUrl || subject?.subjectUrl
+  const assessmentUrl = subject?.source?.assessmentUrl || subject?.assessmentUrl
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/30 px-4 backdrop-blur-sm overscroll-contain">
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="handbook-detail-title"
+        aria-describedby="handbook-detail-description"
+        className="w-full max-w-3xl rounded-3xl border border-white/50 bg-white/80 p-6 shadow-glass backdrop-blur-md"
+      >
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-400">
+              Handbook
+            </p>
+            <h3
+              id="handbook-detail-title"
+              className="mt-2 text-xl font-semibold text-slate-800"
+            >
+              {subject.name}
+            </h3>
+            <p
+              id="handbook-detail-description"
+              className="mt-1 text-xs text-slate-400"
+            >
+              {subject.code} · {subject.creditPoints || '--'} credit points ·{' '}
+              {subject.studyPeriod || 'Study period TBA'}{' '}
+              {subject.year ? `(${subject.year})` : ''}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-slate-500 shadow-neu"
+          >
+            Close
+          </button>
+        </div>
+
+        <div className="mt-4 flex flex-wrap gap-2">
+          {subjectUrl && (
+            <a
+              href={subjectUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="rounded-2xl bg-white px-4 py-2 text-xs font-semibold text-slate-600 shadow-neu transition hover:-translate-y-0.5 hover:shadow-neu-sm"
+            >
+              Open handbook
+            </a>
+          )}
+          {assessmentUrl && (
+            <a
+              href={assessmentUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="rounded-2xl bg-white px-4 py-2 text-xs font-semibold text-slate-600 shadow-neu transition hover:-translate-y-0.5 hover:shadow-neu-sm"
+            >
+              Assessment details
+            </a>
+          )}
+        </div>
+
+        <div className="mt-5 grid gap-4 md:grid-cols-2">
+          <section className="rounded-2xl bg-white/70 p-4 text-xs text-slate-500 shadow-neu">
+            <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-slate-400">
+              Key info
+            </p>
+            <div className="mt-3 space-y-2">
+              <p>
+                <span className="font-semibold text-slate-600">Code:</span>{' '}
+                {subject.code || '--'}
+              </p>
+              <p>
+                <span className="font-semibold text-slate-600">
+                  Credit points:
+                </span>{' '}
+                {subject.creditPoints || '--'}
+              </p>
+              <p>
+                <span className="font-semibold text-slate-600">
+                  Study period:
+                </span>{' '}
+                {subject.studyPeriod || '--'}
+              </p>
+              <p>
+                <span className="font-semibold text-slate-600">Year:</span>{' '}
+                {subject.year || '--'}
+              </p>
+            </div>
+          </section>
+
+          <section className="rounded-2xl bg-white/70 p-4 text-xs text-slate-500 shadow-neu">
+            <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-slate-400">
+              Instructors
+            </p>
+            {instructorEmails.length ? (
+              <div className="mt-3 space-y-2">
+                {instructorEmails.map((email) => (
+                  <a
+                    key={email}
+                    href={`mailto:${email}`}
+                    className="block text-xs font-semibold text-slate-600 underline decoration-dotted"
+                  >
+                    {email}
+                  </a>
+                ))}
+              </div>
+            ) : (
+              <p className="mt-3 text-[11px] text-slate-400">
+                No instructor emails listed.
+              </p>
+            )}
+          </section>
+        </div>
+
+        {subject.availability && (
+          <section className="mt-4 rounded-2xl bg-white/70 p-4 text-xs text-slate-500 shadow-neu">
+            <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-slate-400">
+              Availability
+            </p>
+            <p className="mt-2 whitespace-pre-line text-[11px] text-slate-500">
+              {subject.availability}
+            </p>
+          </section>
+        )}
+
+        <section className="mt-4 rounded-2xl bg-white/70 p-4 text-xs text-slate-500 shadow-neu">
+          <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-slate-400">
+            Overview
+          </p>
+          {overviewItems.length ? (
+            <div className="mt-3 max-h-[45vh] space-y-3 overflow-y-auto pr-2 text-[11px] text-slate-500">
+              {overviewItems.map((item, index) => (
+                <p key={`${subject.code}-overview-${index}`} className="whitespace-pre-line">
+                  {item}
+                </p>
+              ))}
+            </div>
+          ) : (
+            <p className="mt-3 text-[11px] text-slate-400">
+              No overview available for this subject.
+            </p>
+          )}
+        </section>
       </div>
     </div>
   )
