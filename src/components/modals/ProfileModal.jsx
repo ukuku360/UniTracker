@@ -16,9 +16,18 @@ export default function ProfileModal({
 
   const displayName = getSafeDisplayName(user)
   const provider =
-    user?.app_metadata?.provider || user?.app_metadata?.providers?.[0] || 'email'
-  const lastSignIn = user?.last_sign_in_at || user?.last_sign_in
-  const confirmedAt = user?.email_confirmed_at || user?.confirmed_at
+    user?.providerData?.[0]?.providerId ||
+    user?.app_metadata?.provider ||
+    user?.app_metadata?.providers?.[0] ||
+    'email'
+  const userId = user?.uid || user?.id
+  const createdAt = user?.metadata?.creationTime || user?.created_at
+  const lastSignIn =
+    user?.metadata?.lastSignInTime || user?.last_sign_in_at || user?.last_sign_in
+  const emailVerified =
+    typeof user?.emailVerified === 'boolean'
+      ? user.emailVerified
+      : Boolean(user?.email_confirmed_at || user?.confirmed_at)
   const syncLabel = dataStatus === 'ready' ? 'Synced' : 'Syncing'
 
   return (
@@ -65,7 +74,7 @@ export default function ProfileModal({
             <div className="mt-3 space-y-2 text-xs text-slate-500">
               <p>
                 <span className="font-semibold text-slate-600">User ID:</span>{' '}
-                {user?.id || '--'}
+                {userId || '--'}
               </p>
               <p>
                 <span className="font-semibold text-slate-600">Provider:</span>{' '}
@@ -73,11 +82,11 @@ export default function ProfileModal({
               </p>
               <p>
                 <span className="font-semibold text-slate-600">Email verified:</span>{' '}
-                {confirmedAt ? 'Yes' : 'No'}
+                {emailVerified ? 'Yes' : 'No'}
               </p>
               <p>
                 <span className="font-semibold text-slate-600">Created:</span>{' '}
-                {formatDateTime(user?.created_at)}
+                {formatDateTime(createdAt)}
               </p>
               <p>
                 <span className="font-semibold text-slate-600">Last sign-in:</span>{' '}
@@ -124,7 +133,7 @@ export default function ProfileModal({
             {syncLabel}
           </p>
           <p className="mt-1 text-[11px] text-slate-400">
-            Your dashboard is backed up to Supabase while you stay signed in.
+            Your dashboard is backed up to Firebase while you stay signed in.
           </p>
         </div>
       </div>

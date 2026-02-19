@@ -10,7 +10,16 @@ import {
   startOfMonth,
   startOfWeek,
 } from 'date-fns'
-import { supabase } from '../lib/supabase'
+import {
+  browserLocalPersistence,
+  createUserWithEmailAndPassword,
+  onAuthStateChanged,
+  setPersistence,
+  signInWithEmailAndPassword,
+  signOut,
+} from 'firebase/auth'
+import { doc, getDoc, setDoc } from 'firebase/firestore'
+import { auth, db, hasFirebaseConfig } from '../lib/firebase'
 
 export const COURSE_COLORS = [
   { name: 'Soft Blue', value: '#7aa2f7' },
@@ -87,28 +96,47 @@ const fetchJson = async (url, options = {}) => {
   return response.json()
 }
 
+const parseDateValue = (value) => {
+  if (!value) return null
+  if (value instanceof Date) return isValid(value) ? value : null
+  if (typeof value === 'number') {
+    const fromTimestamp = new Date(value)
+    return isValid(fromTimestamp) ? fromTimestamp : null
+  }
+  const isoCandidate = parseISO(String(value))
+  if (isValid(isoCandidate)) return isoCandidate
+  const fallbackCandidate = new Date(value)
+  return isValid(fallbackCandidate) ? fallbackCandidate : null
+}
+
 export const formatDateShort = (value) => {
   if (!value) return 'No date'
-  try {
-    return format(parseISO(value), 'MMM d')
-  } catch {
-    return value
-  }
+  const parsed = parseDateValue(value)
+  if (!parsed) return String(value)
+  return format(parsed, 'MMM d')
 }
 
 export const formatDateTime = (value) => {
   if (!value) return '--'
-  try {
-    return format(parseISO(value), 'MMM d, yyyy · h:mm a')
-  } catch {
-    return value
-  }
+  const parsed = parseDateValue(value)
+  if (!parsed) return String(value)
+  return format(parsed, 'MMM d, yyyy · h:mm a')
 }
 
 export const getSafeDisplayName = (user) => {
   if (!user) return 'Student'
   const metadata = user.user_metadata || {}
-  return metadata.full_name || metadata.name || metadata.display_name || 'Student'
+  const firebaseDisplayName =
+    user.displayName ||
+    user.providerData?.find((provider) => provider?.displayName)?.displayName
+  if (firebaseDisplayName) return firebaseDisplayName
+  return (
+    metadata.full_name ||
+    metadata.name ||
+    metadata.display_name ||
+    user.email?.split('@')[0] ||
+    'Student'
+  )
 }
 
 export const toNumberOrNull = (value) => {
@@ -340,11 +368,6 @@ const assessmentSignature = (assessment) => {
 }
 
 export const useDashboardDomain = () => {
-  const configuredSupabaseUrl = (import.meta.env.VITE_SUPABASE_URL || '').trim()
-  const configuredSupabaseAnonKey = (import.meta.env.VITE_SUPABASE_ANON_KEY || '').trim()
-  const hasSupabaseConfig = Boolean(
-    configuredSupabaseUrl && configuredSupabaseAnonKey,
-  )
   const [authView, setAuthView] = useState(AUTH_VIEWS.signIn)
   const [authStatus, setAuthStatus] = useState('loading')
   const [authError, setAuthError] = useState('')
@@ -389,36 +412,39 @@ export const useDashboardDomain = () => {
   const [handbookQuery, setHandbookQuery] = useState('')
 
   useEffect(() => {
-    if (!hasSupabaseConfig) {
+    if (!hasFirebaseConfig || !auth) {
       setAuthStatus('ready')
       return
     }
 
     let isMounted = true
+    let unsubscribe = () => {}
 
-    supabase.auth
-      .getSession()
-      .then(({ data }) => {
+    const initAuth = async () => {
+      try {
+        await setPersistence(auth, browserLocalPersistence)
+      } catch (error) {
+        console.warn('Failed to apply auth persistence', error)
+      }
+
+      unsubscribe = onAuthStateChanged(auth, (nextUser) => {
         if (!isMounted) return
-        setUser(data?.session?.user ?? null)
+        setUser(nextUser || null)
         setAuthStatus('ready')
       })
-      .catch(() => {
-        if (!isMounted) return
-        setAuthStatus('ready')
-      })
+    }
 
-    const { data: authListener } = supabase.auth.onAuthStateChange(
-      (_event, session) => {
-        setUser(session?.user ?? null)
-      },
-    )
+    initAuth().catch((error) => {
+      console.warn('Failed to initialize auth', error)
+      if (!isMounted) return
+      setAuthStatus('ready')
+    })
 
     return () => {
       isMounted = false
-      authListener?.subscription?.unsubscribe()
+      unsubscribe()
     }
-  }, [hasSupabaseConfig])
+  }, [])
 
   useEffect(() => {
     return () => {
@@ -430,18 +456,19 @@ export const useDashboardDomain = () => {
 
   const persistUserData = useCallback(
     async (payload) => {
-      if (!user) return
-      const { error } = await supabase.from('user_data').upsert(
-        {
-          user_id: user.id,
-          courses: payload.courses,
-          assessments: payload.assessments,
-          wam_goal: payload.wamGoal,
-          updated_at: new Date().toISOString(),
-        },
-        { onConflict: 'user_id' },
-      )
-      if (error) {
+      if (!user || !db) return
+      try {
+        await setDoc(
+          doc(db, 'user_data', user.uid),
+          {
+            courses: payload.courses,
+            assessments: payload.assessments,
+            wam_goal: payload.wamGoal,
+            updated_at: new Date().toISOString(),
+          },
+          { merge: true },
+        )
+      } catch (error) {
         console.warn('Failed to sync data', error)
       }
     },
@@ -449,32 +476,32 @@ export const useDashboardDomain = () => {
   )
 
   useEffect(() => {
-    if (user || !hasSupabaseConfig) return
+    if (user || !hasFirebaseConfig) return
     setCourses(loadLocal(STORAGE_KEYS.courses, []))
     setAssessments(loadLocal(STORAGE_KEYS.assessments, []))
     setWamGoal(loadLocal(STORAGE_KEYS.wamGoal, ''))
     setHandbookMeta(null)
     setDataStatus('idle')
     hasLoadedRemoteRef.current = false
-  }, [user, hasSupabaseConfig, persistUserData])
+  }, [user])
 
   useEffect(() => {
-    if (user || !hasSupabaseConfig) return
+    if (user || !hasFirebaseConfig) return
     saveLocal(STORAGE_KEYS.courses, courses)
-  }, [courses, user, hasSupabaseConfig])
+  }, [courses, user])
 
   useEffect(() => {
-    if (user || !hasSupabaseConfig) return
+    if (user || !hasFirebaseConfig) return
     saveLocal(STORAGE_KEYS.assessments, assessments)
-  }, [assessments, user, hasSupabaseConfig])
+  }, [assessments, user])
 
   useEffect(() => {
-    if (user || !hasSupabaseConfig) return
+    if (user || !hasFirebaseConfig) return
     saveLocal(STORAGE_KEYS.wamGoal, wamGoal)
-  }, [wamGoal, user, hasSupabaseConfig])
+  }, [wamGoal, user])
 
   useEffect(() => {
-    if (!user || !hasSupabaseConfig) return
+    if (!user || !hasFirebaseConfig || !db) return
     let isActive = true
     setDataStatus('loading')
 
@@ -485,38 +512,38 @@ export const useDashboardDomain = () => {
     }
 
     const loadRemote = async () => {
-      const { data, error } = await supabase
-        .from('user_data')
-        .select('courses, assessments, wam_goal')
-        .eq('user_id', user.id)
-        .maybeSingle()
+      try {
+        const remoteDoc = await getDoc(doc(db, 'user_data', user.uid))
+        if (!isActive) return
 
-      if (!isActive) return
-
-      if (error) {
+        if (remoteDoc.exists()) {
+          const data = remoteDoc.data() || {}
+          setCourses(data.courses ?? [])
+          setAssessments(data.assessments ?? [])
+          setWamGoal(data.wam_goal ?? '')
+        } else if (
+          localSnapshot.courses.length ||
+          localSnapshot.assessments.length ||
+          localSnapshot.wamGoal
+        ) {
+          setCourses(localSnapshot.courses)
+          setAssessments(localSnapshot.assessments)
+          setWamGoal(localSnapshot.wamGoal)
+          await persistUserData(localSnapshot)
+        } else {
+          setCourses([])
+          setAssessments([])
+          setWamGoal('')
+        }
+      } catch (error) {
+        if (!isActive) return
         console.warn('Failed to load remote data', error)
         setCourses(localSnapshot.courses)
         setAssessments(localSnapshot.assessments)
         setWamGoal(localSnapshot.wamGoal)
-      } else if (data) {
-        setCourses(data.courses ?? [])
-        setAssessments(data.assessments ?? [])
-        setWamGoal(data.wam_goal ?? '')
-      } else if (
-        localSnapshot.courses.length ||
-        localSnapshot.assessments.length ||
-        localSnapshot.wamGoal
-      ) {
-        setCourses(localSnapshot.courses)
-        setAssessments(localSnapshot.assessments)
-        setWamGoal(localSnapshot.wamGoal)
-        await persistUserData(localSnapshot)
-      } else {
-        setCourses([])
-        setAssessments([])
-        setWamGoal('')
       }
 
+      if (!isActive) return
       hasLoadedRemoteRef.current = true
       setDataStatus('ready')
     }
@@ -526,7 +553,7 @@ export const useDashboardDomain = () => {
     return () => {
       isActive = false
     }
-  }, [user, hasSupabaseConfig, persistUserData])
+  }, [user, persistUserData])
 
   useEffect(() => {
     if (!user) {
@@ -626,7 +653,7 @@ export const useDashboardDomain = () => {
   }, [user, loadHandbookData])
 
   useEffect(() => {
-    if (!user || !hasSupabaseConfig || !hasLoadedRemoteRef.current) return
+    if (!user || !hasFirebaseConfig || !db || !hasLoadedRemoteRef.current) return
     if (saveTimeoutRef.current) {
       clearTimeout(saveTimeoutRef.current)
     }
@@ -639,7 +666,7 @@ export const useDashboardDomain = () => {
         clearTimeout(saveTimeoutRef.current)
       }
     }
-  }, [courses, assessments, wamGoal, user, hasSupabaseConfig, persistUserData])
+  }, [courses, assessments, wamGoal, user, persistUserData])
 
   const courseMap = useMemo(
     () => new Map(courses.map((course) => [course.id, course])),
@@ -976,19 +1003,26 @@ export const useDashboardDomain = () => {
   )
 
   const handleAuthSubmit = async ({ email, password, mode }) => {
-    if (!hasSupabaseConfig) return
+    if (!hasFirebaseConfig || !auth) return
     setAuthError('')
     setAuthNotice('')
     setAuthBusy(true)
-    const isSignUp = mode === AUTH_VIEWS.signUp
-    const { data, error } = isSignUp
-      ? await supabase.auth.signUp({ email, password })
-      : await supabase.auth.signInWithPassword({ email, password })
 
-    if (error) {
-      setAuthError(error.message)
-    } else if (isSignUp && !data?.session) {
-      setAuthNotice('Check your email to confirm your account, then sign in.')
+    try {
+      const isSignUp = mode === AUTH_VIEWS.signUp
+      if (isSignUp) {
+        await createUserWithEmailAndPassword(auth, email, password)
+        setAuthNotice('Account created. You are now signed in.')
+      } else {
+        await signInWithEmailAndPassword(auth, email, password)
+      }
+    } catch (error) {
+      const rawMessage = String(error?.message || '')
+      const cleanedMessage = rawMessage
+        .replace(/^Firebase:\s*/i, '')
+        .replace(/\s*\(auth\/[^)]+\)\.?$/i, '')
+        .trim()
+      setAuthError(cleanedMessage || 'Authentication failed.')
     }
     setAuthBusy(false)
   }
@@ -1000,8 +1034,8 @@ export const useDashboardDomain = () => {
   }
 
   const handleSignOut = async () => {
-    if (!hasSupabaseConfig) return
-    await supabase.auth.signOut()
+    if (!hasFirebaseConfig || !auth) return
+    await signOut(auth)
   }
 
   const openAddCourse = () => {
@@ -1054,7 +1088,7 @@ export const useDashboardDomain = () => {
   const showDisplayName = displayName && displayName !== 'Student'
 
   return {
-    hasSupabaseConfig,
+    hasFirebaseConfig,
     authView,
     setAuthView,
     switchAuthView,

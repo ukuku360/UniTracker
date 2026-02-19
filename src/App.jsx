@@ -17,7 +17,7 @@ import AssessmentModal from './components/modals/AssessmentModal'
 
 function App() {
   const {
-    hasSupabaseConfig,
+    hasFirebaseConfig,
     authView,
     switchAuthView,
     authStatus,
@@ -94,7 +94,7 @@ function App() {
     return <LoadingScreen label="Checking your session…" />
   }
 
-  if (!hasSupabaseConfig) {
+  if (!hasFirebaseConfig) {
     return <ConfigMissingScreen />
   }
 
@@ -848,16 +848,18 @@ function ConfigMissingScreen() {
             Setup Required
           </p>
           <h1 className="mt-3 text-2xl font-semibold text-slate-800">
-            Connect Supabase to enable accounts
+            Connect Firebase to enable accounts
           </h1>
           <p className="mt-3 text-sm text-slate-500">
-            Add your Supabase project URL and anon key in a `.env.local` file, then
-            restart the dev server.
+            Add your Firebase web app config in `.env.local`, then restart the dev
+            server.
           </p>
           <div className="mt-4 rounded-2xl bg-white/80 p-4 text-xs text-slate-500 shadow-neu">
             <p className="font-semibold text-slate-600">Required keys</p>
-            <p className="mt-2">VITE_SUPABASE_URL=</p>
-            <p>VITE_SUPABASE_ANON_KEY=</p>
+            <p className="mt-2">VITE_FIREBASE_API_KEY=</p>
+            <p>VITE_FIREBASE_AUTH_DOMAIN=</p>
+            <p>VITE_FIREBASE_PROJECT_ID=</p>
+            <p>VITE_FIREBASE_APP_ID=</p>
           </div>
         </div>
       </div>

@@ -1,50 +1,52 @@
 # UniTracker
 
-## Authentication (Supabase)
+## Authentication + Sync (Firebase)
 
-This project now uses Supabase Auth (email + password) and stores each user’s data
-in a single `user_data` row.
+This project uses Firebase Auth (email/password) and Firestore. Each user is
+stored in `user_data/{uid}`.
 
-### 1) Create a Supabase project
+### 1) Create Firebase project + web app
 
-- Enable **Email** auth in the Supabase dashboard.
-- Decide if you want email confirmation for sign ups (optional).
+- Create a Firebase project in the Firebase console.
+- Add a **Web App** and copy its config values.
 
-### 2) Create the `user_data` table + policies
+### 2) Enable email/password sign-in
 
-Run the SQL below in the Supabase SQL editor:
+- Firebase Console -> Authentication -> Sign-in method
+- Enable **Email/Password**
 
-```sql
-create table public.user_data (
-  user_id uuid primary key references auth.users(id) on delete cascade,
-  courses jsonb not null default '[]'::jsonb,
-  assessments jsonb not null default '[]'::jsonb,
-  wam_goal text not null default '',
-  updated_at timestamptz not null default now()
-);
+### 3) Create Firestore + security rules
 
-alter table public.user_data enable row level security;
+- Firebase Console -> Firestore Database -> Create database
+- Apply rules:
 
-create policy "Users can read their data"
-  on public.user_data for select
-  using (auth.uid() = user_id);
-
-create policy "Users can insert their data"
-  on public.user_data for insert
-  with check (auth.uid() = user_id);
-
-create policy "Users can update their data"
-  on public.user_data for update
-  using (auth.uid() = user_id);
+```txt
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /user_data/{userId} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+    }
+  }
+}
 ```
 
-### 3) Configure local env
+### 4) Configure local env
 
 Copy `.env.example` to `.env.local` and fill in:
 
+```bash
+VITE_FIREBASE_API_KEY=...
+VITE_FIREBASE_AUTH_DOMAIN=...
+VITE_FIREBASE_PROJECT_ID=...
+VITE_FIREBASE_APP_ID=...
 ```
-VITE_SUPABASE_URL=your-project-url
-VITE_SUPABASE_ANON_KEY=your-anon-key
+
+Optional keys (recommended if present in your Firebase config):
+
+```bash
+VITE_FIREBASE_STORAGE_BUCKET=...
+VITE_FIREBASE_MESSAGING_SENDER_ID=...
 ```
 
 Then restart the dev server.
