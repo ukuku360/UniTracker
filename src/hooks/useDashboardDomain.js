@@ -45,7 +45,8 @@ export const DUE_SOON_DAYS = 7
 
 const HANDBOOK_DATA_URL = '/data/handbook-2026-s1.json'
 
-const HANDBOOK_API_BASE = import.meta.env.VITE_HANDBOOK_API_BASE || ''
+const HANDBOOK_API_BASE = (import.meta.env.VITE_HANDBOOK_API_BASE || '').trim()
+const hasHandbookApi = Boolean(HANDBOOK_API_BASE)
 const buildApiUrl = (path) =>
   HANDBOOK_API_BASE
     ? `${HANDBOOK_API_BASE.replace(/\/$/, '')}${path}`
@@ -55,7 +56,8 @@ const STORAGE_KEYS = {
   courses: 'unitracker-courses',
   assessments: 'unitracker-assessments',
   wamGoal: 'unitracker-wam-goal',
-  handbookCache: 'unitracker-handbook-cache',
+  handbookMeta: 'unitracker-handbook-meta',
+  handbookCacheLegacy: 'unitracker-handbook-cache',
 }
 
 export const AUTH_VIEWS = {
@@ -85,6 +87,15 @@ const saveLocal = (key, value) => {
     window.localStorage.setItem(key, JSON.stringify(value))
   } catch (error) {
     console.warn('Failed to save to storage', error)
+  }
+}
+
+const removeLocal = (key) => {
+  if (typeof window === 'undefined') return
+  try {
+    window.localStorage.removeItem(key)
+  } catch (error) {
+    console.warn('Failed to remove storage key', error)
   }
 }
 
@@ -612,24 +623,20 @@ export const useDashboardDomain = () => {
     }
   }, [user])
 
+  useEffect(() => {
+    removeLocal(STORAGE_KEYS.handbookCacheLegacy)
+  }, [])
+
   const loadHandbookData = useCallback(
     async ({ force = false } = {}) => {
       if (!user) return
       setHandbookStatus('loading')
       setHandbookError('')
 
-      const cached = loadLocal(STORAGE_KEYS.handbookCache, null)
-      const cachedMeta = cached
-        ? {
-            version: cached.version || null,
-            generatedAt: cached.generatedAt || null,
-            studyPeriod: cached.source?.studyPeriod || null,
-            year: cached.source?.year || null,
-          }
-        : null
+      const cachedMeta = loadLocal(STORAGE_KEYS.handbookMeta, null)
       let meta = null
 
-      if (!force) {
+      if (hasHandbookApi && !force) {
         try {
           meta = await fetchJson(buildApiUrl('/api/handbook/meta'))
         } catch {
@@ -637,23 +644,15 @@ export const useDashboardDomain = () => {
         }
       }
 
-      if (
-        !force &&
-        meta?.version &&
-        cached?.version === meta.version &&
-        cached?.items?.length
-      ) {
-        setHandbookData(cached.items)
-        setHandbookMeta(cachedMeta)
-        setHandbookStatus('ready')
-        return
-      }
-
       try {
         let payload = null
-        try {
-          payload = await fetchJson(buildApiUrl('/api/handbook'))
-        } catch {
+        if (hasHandbookApi) {
+          try {
+            payload = await fetchJson(buildApiUrl('/api/handbook'))
+          } catch {
+            payload = await fetchJson(HANDBOOK_DATA_URL)
+          }
+        } else {
           payload = await fetchJson(HANDBOOK_DATA_URL)
         }
 
@@ -672,22 +671,19 @@ export const useDashboardDomain = () => {
         })
         setHandbookStatus('ready')
 
-        saveLocal(STORAGE_KEYS.handbookCache, {
+        saveLocal(STORAGE_KEYS.handbookMeta, {
           version,
           generatedAt,
-          source: {
-            studyPeriod,
-            year,
-          },
-          items,
+          studyPeriod,
+          year,
           cachedAt: new Date().toISOString(),
         })
       } catch (error) {
         console.warn('Failed to load handbook data', error)
-        if (cached?.items?.length) {
-          setHandbookData(cached.items)
+        if (cachedMeta) {
           setHandbookMeta(cachedMeta)
-          setHandbookStatus('ready')
+          setHandbookStatus('error')
+          setHandbookError('Handbook data is temporarily unavailable.')
         } else {
           setHandbookMeta(null)
           setHandbookStatus('error')
@@ -1068,7 +1064,9 @@ export const useDashboardDomain = () => {
         await signInWithEmailAndPassword(auth, email, password)
       }
     } catch (error) {
-      console.warn('Auth error', error?.code, error?.message)
+      if (import.meta.env.DEV) {
+        console.warn('Auth error', error?.code, error?.message)
+      }
       setAuthError(formatFirebaseAuthError(error, mode))
     }
     setAuthBusy(false)
