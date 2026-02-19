@@ -67,6 +67,16 @@ npm run scrape:handbook -- --search <url> --max-pages 5 --concurrency 4 --delay-
 
 The output is written to `public/data/handbook-2026-s1.json`.
 
+### Import handbook assessments into a course
+
+After you add a course (by subject code), open the course detail modal and use
+`Import handbook` to create assessment items from `assessment.tables` in the
+handbook dataset.
+
+- Duplicate items are skipped automatically.
+- Weight is mapped from `Percentage`/`Weight` columns.
+- Due date is parsed when timing text contains a concrete date.
+
 ### Optional: Handbook API server
 
 Run a lightweight API server that provides `/api/handbook/meta` and `/api/handbook/refresh`:

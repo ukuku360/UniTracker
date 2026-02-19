@@ -130,7 +130,46 @@ const parseAvailability = ($) => {
   return boxText
 }
 
+const parseAssessmentTable = ($, tableNode) => {
+  const headers = []
+  tableNode
+    .find('thead th')
+    .each((_, th) => headers.push(cleanText($(th).text())))
+  if (!headers.length) {
+    tableNode
+      .find('tr')
+      .first()
+      .find('th, td')
+      .each((_, cell) => headers.push(cleanText($(cell).text())))
+  }
+  const rows = []
+  tableNode.find('tbody tr').each((_, row) => {
+    const cells = $(row).find('td')
+    if (!cells.length) return
+    const rowData = {}
+    cells.each((index, cell) => {
+      const key = headers[index] || `Column ${index + 1}`
+      rowData[key] = cleanText($(cell).text())
+    })
+    rows.push(rowData)
+  })
+  if (!rows.length) return null
+  return {
+    columns: headers,
+    rows,
+  }
+}
+
 const parseAssessmentTables = ($, semesterLabel = 'Semester 1') => {
+  if (!semesterLabel) {
+    const tables = []
+    $('table').each((_, table) => {
+      const parsed = parseAssessmentTable($, $(table))
+      if (parsed) tables.push(parsed)
+    })
+    return tables
+  }
+
   const headings = $('h3, h4').filter((_, el) =>
     $(el).text().toLowerCase().includes(semesterLabel.toLowerCase()),
   )
@@ -141,34 +180,8 @@ const parseAssessmentTables = ($, semesterLabel = 'Semester 1') => {
   while (node.length) {
     if (node.is('h2') || node.is('h3') || node.is('h4')) break
     if (node.is('table')) {
-      const headers = []
-      node
-        .find('thead th')
-        .each((_, th) => headers.push(cleanText($(th).text())))
-      if (!headers.length) {
-        node
-          .find('tr')
-          .first()
-          .find('th, td')
-          .each((_, cell) => headers.push(cleanText($(cell).text())))
-      }
-      const rows = []
-      node.find('tbody tr').each((_, row) => {
-        const cells = $(row).find('td')
-        if (!cells.length) return
-        const rowData = {}
-        cells.each((index, cell) => {
-          const key = headers[index] || `Column ${index + 1}`
-          rowData[key] = cleanText($(cell).text())
-        })
-        rows.push(rowData)
-      })
-      if (rows.length) {
-        tables.push({
-          columns: headers,
-          rows,
-        })
-      }
+      const parsed = parseAssessmentTable($, node)
+      if (parsed) tables.push(parsed)
     }
     node = node.next()
   }
@@ -177,6 +190,11 @@ const parseAssessmentTables = ($, semesterLabel = 'Semester 1') => {
 
 const parseSemesterEmails = ($, semesterLabel = 'Semester 1') => {
   const emails = new Set()
+  if (!semesterLabel) {
+    extractEmails($.root().text()).forEach((email) => emails.add(email))
+    return [...emails]
+  }
+
   const semesterHeading = $('h5')
     .filter((_, el) =>
       $(el).text().toLowerCase().includes(semesterLabel.toLowerCase()),
@@ -214,6 +232,9 @@ const asyncPool = async (limit, list, iterator) => {
 const run = async () => {
   const searchConfig = new URL(searchUrl)
   searchConfig.searchParams.set('page', '1')
+  const targetYear = Number(searchConfig.searchParams.get('year') || 2026)
+  const studyPeriodLabel = onlySemester1 ? 'Semester 1' : 'All study periods'
+  const semesterFilter = onlySemester1 ? 'Semester 1' : ''
   const firstPageHtml = await fetchWithRetry(searchConfig.toString())
   const maxPage = maxPagesArg || parseMaxPage(firstPageHtml)
 
@@ -255,7 +276,9 @@ const run = async () => {
     }
 
     await sleep(delayMs)
-    const subjectUrl = buildUrl(item.href || `/2026/subjects/${item.code.toLowerCase()}`)
+    const subjectUrl = buildUrl(
+      item.href || `/${targetYear}/subjects/${item.code.toLowerCase()}`,
+    )
     let subjectHtml
     try {
       subjectHtml = await fetchWithRetry(subjectUrl)
@@ -283,8 +306,8 @@ const run = async () => {
     try {
       const assessmentHtml = await fetchWithRetry(assessmentUrl)
       const $assessment = cheerio.load(assessmentHtml)
-      assessmentTables = parseAssessmentTables($assessment, 'Semester 1')
-      instructorEmails = parseSemesterEmails($assessment, 'Semester 1')
+      assessmentTables = parseAssessmentTables($assessment, semesterFilter)
+      instructorEmails = parseSemesterEmails($assessment, semesterFilter)
     } catch (error) {
       console.warn(`Failed to fetch assessment ${item.code}:`, error.message)
     }
@@ -295,7 +318,7 @@ const run = async () => {
         await sleep(delayMs)
         const datesHtml = await fetchWithRetry(datesUrl)
         const $dates = cheerio.load(datesHtml)
-        instructorEmails = parseSemesterEmails($dates, 'Semester 1')
+        instructorEmails = parseSemesterEmails($dates, semesterFilter)
       } catch (error) {
         console.warn(`Failed to fetch dates-times ${item.code}:`, error.message)
       }
@@ -304,8 +327,8 @@ const run = async () => {
     results.push({
       code: item.code,
       name: item.name,
-      year: 2026,
-      studyPeriod: 'Semester 1',
+      year: targetYear,
+      studyPeriod: studyPeriodLabel,
       creditPoints: Number.isFinite(creditPoints) ? creditPoints : null,
       overview,
       assessment: {
@@ -338,8 +361,8 @@ const run = async () => {
     version,
     source: {
       searchUrl: searchConfig.toString(),
-      studyPeriod: 'Semester 1',
-      year: 2026,
+      studyPeriod: studyPeriodLabel,
+      year: targetYear,
     },
     stats: {
       totalFound: itemsList.length,
