@@ -340,8 +340,10 @@ const assessmentSignature = (assessment) => {
 }
 
 export const useDashboardDomain = () => {
+  const configuredSupabaseUrl = (import.meta.env.VITE_SUPABASE_URL || '').trim()
+  const configuredSupabaseAnonKey = (import.meta.env.VITE_SUPABASE_ANON_KEY || '').trim()
   const hasSupabaseConfig = Boolean(
-    import.meta.env.VITE_SUPABASE_URL && import.meta.env.VITE_SUPABASE_ANON_KEY,
+    configuredSupabaseUrl && configuredSupabaseAnonKey,
   )
   const [authView, setAuthView] = useState(AUTH_VIEWS.signIn)
   const [authStatus, setAuthStatus] = useState('loading')
