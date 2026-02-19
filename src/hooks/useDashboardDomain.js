@@ -367,6 +367,57 @@ const assessmentSignature = (assessment) => {
   return `${assessment.courseId}|${title}|${type}|${weight}|${dueDate}`
 }
 
+const formatFirebaseAuthError = (error, mode) => {
+  const rawCode = String(error?.code || '').toLowerCase()
+  const rawMessage = String(error?.message || '')
+  const upperMessage = rawMessage.toUpperCase()
+
+  if (rawCode === 'auth/configuration-not-found' || upperMessage.includes('CONFIGURATION_NOT_FOUND')) {
+    return 'Firebase Authentication is not initialized. In Firebase Console, open Authentication, click Get started, then enable Email/Password.'
+  }
+
+  if (rawCode === 'auth/operation-not-allowed') {
+    return 'Email/Password sign-in is disabled. Enable it in Firebase Console -> Authentication -> Sign-in method.'
+  }
+
+  if (
+    rawCode === 'auth/invalid-credential' ||
+    rawCode === 'auth/invalid-login-credentials' ||
+    rawCode === 'auth/wrong-password' ||
+    rawCode === 'auth/user-not-found'
+  ) {
+    return mode === AUTH_VIEWS.signUp
+      ? 'Unable to create account with these details.'
+      : 'Invalid email or password.'
+  }
+
+  if (rawCode === 'auth/email-already-in-use') {
+    return 'This email is already in use. Try signing in instead.'
+  }
+
+  if (rawCode === 'auth/invalid-email') {
+    return 'Invalid email address format.'
+  }
+
+  if (rawCode === 'auth/too-many-requests') {
+    return 'Too many attempts. Please wait a moment and try again.'
+  }
+
+  if (rawCode === 'auth/network-request-failed') {
+    return 'Network request failed. Check your connection and try again.'
+  }
+
+  const cleanedMessage = rawMessage
+    .replace(/^Firebase:\s*/i, '')
+    .replace(/\s*\(auth\/[^)]+\)\.?$/i, '')
+    .trim()
+
+  if (cleanedMessage && cleanedMessage.toLowerCase() !== 'error') {
+    return cleanedMessage
+  }
+  return 'Authentication failed.'
+}
+
 export const useDashboardDomain = () => {
   const [authView, setAuthView] = useState(AUTH_VIEWS.signIn)
   const [authStatus, setAuthStatus] = useState('loading')
@@ -1017,12 +1068,8 @@ export const useDashboardDomain = () => {
         await signInWithEmailAndPassword(auth, email, password)
       }
     } catch (error) {
-      const rawMessage = String(error?.message || '')
-      const cleanedMessage = rawMessage
-        .replace(/^Firebase:\s*/i, '')
-        .replace(/\s*\(auth\/[^)]+\)\.?$/i, '')
-        .trim()
-      setAuthError(cleanedMessage || 'Authentication failed.')
+      console.warn('Auth error', error?.code, error?.message)
+      setAuthError(formatFirebaseAuthError(error, mode))
     }
     setAuthBusy(false)
   }
