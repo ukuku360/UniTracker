@@ -12,6 +12,7 @@
     "api:handbook": "node server/handbook-api.mjs"
   },
   "dependencies": {
+    "canvas-confetti": "^1.9.4",
     "date-fns": "^4.1.0",
     "firebase": "^12.9.0",
     "react": "^18.2.0",

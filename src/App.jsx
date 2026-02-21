@@ -14,6 +14,8 @@ import CourseModal from './components/modals/CourseModal'
 import DeleteCourseModal from './components/modals/DeleteCourseModal'
 import HandbookDetailModal from './components/modals/HandbookDetailModal'
 import AssessmentModal from './components/modals/AssessmentModal'
+import PomodoroTimer from './components/PomodoroTimer'
+import confetti from 'canvas-confetti'
 
 function App() {
   const {
@@ -318,11 +320,12 @@ function App() {
           </section>
         </div>
 
-        <section className="rounded-3xl border border-white/60 bg-white/55 p-6 shadow-neu">
-          <div className="flex flex-wrap items-center justify-between gap-3">
+        <section className="relative overflow-hidden rounded-3xl border border-white/60 bg-gradient-to-br from-indigo-100 via-fuchsia-100 to-cyan-100 bg-[length:200%_200%] p-6 shadow-neu animate-gradient-x">
+          <div className="absolute inset-0 bg-white/40 backdrop-blur-[2px]" />
+          <div className="relative z-10 flex flex-wrap items-center justify-between gap-3">
             <div>
-              <h2 className="text-lg font-semibold text-slate-700">Action Center</h2>
-              <p className="text-xs text-slate-400">
+              <h2 className="text-lg font-semibold text-slate-800">Action Center</h2>
+              <p className="text-xs text-slate-500">
                 Prioritized from deadlines and goal feasibility.
               </p>
             </div>
@@ -332,7 +335,7 @@ function App() {
             </span>
           </div>
 
-          <div className="mt-4 grid gap-3 sm:grid-cols-3">
+          <div className="relative z-10 mt-4 grid gap-3 sm:grid-cols-3">
             <div className="rounded-2xl bg-white/80 p-4 shadow-neu">
               <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-slate-400">
                 Overdue
@@ -365,7 +368,7 @@ function App() {
           </div>
 
           {(primaryUrgentItem || primaryRiskCourse) && (
-            <div className="mt-4 flex flex-wrap gap-2">
+            <div className="relative z-10 mt-4 flex flex-wrap gap-2">
               {primaryUrgentItem && (
                 <button
                   type="button"
@@ -697,6 +700,8 @@ function App() {
         </div>
       </div>
 
+      <PomodoroTimer />
+
       {courseModal.open && (
         <CourseModal
           key={courseModal.course?.id || 'new-course'}
@@ -765,6 +770,16 @@ function App() {
             })
           }
           onSave={(payload) => {
+            const isNewlyCompleted =
+              payload.completed && !assessmentModal.assessment?.completed
+            if (isNewlyCompleted) {
+              confetti({
+                particleCount: 150,
+                spread: 70,
+                origin: { y: 0.6 },
+                colors: ['#6c63ff', '#2ec4b6', '#f87171', '#fbbf24'],
+              })
+            }
             handleSaveAssessment(payload)
             setAssessmentModal({
               open: false,
